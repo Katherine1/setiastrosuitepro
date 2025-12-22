@@ -98,6 +98,19 @@ from setiastro.saspro.mfdeconv import MultiFrameDeconvWorker
 from setiastro.saspro.mfdeconvcudnn import MultiFrameDeconvWorkercuDNN
 from setiastro.saspro.mfdeconvsport import MultiFrameDeconvWorkerSport
 from setiastro.saspro.accel_installer import current_backend
+
+# C++ Backend fallback for Stacking
+_HAS_CPP_STACKER = False
+try:
+    from setiastro.saspro.cpp import saspro_cpp as _cpp
+    if hasattr(_cpp, "Stacker"):
+        CppStacker = _cpp.Stacker
+        _HAS_CPP_STACKER = True
+    else:
+        CppStacker = None
+except ImportError:
+    CppStacker = None
+    _HAS_CPP_STACKER = False
 from setiastro.saspro.accel_workers import AccelInstallWorker
 from setiastro.saspro.runtime_torch import add_runtime_to_sys_path
 from setiastro.saspro.free_torch_memory import _free_torch_memory
@@ -16236,67 +16249,109 @@ class StackingSuiteDialog(QDialog):
                 algo = (algo_override or self.rejection_algorithm)
                 log(f"  ◦ applying rejection algorithm: {algo}")
 
-                if algo in ("Comet Median", "Simple Median (No Rejection)"):
-                    tile_result  = np.median(ts, axis=0)
-                    tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
+                # Check if we can use C++ for this algo
+                use_cpp = _HAS_CPP_STACKER
+                # Comet specific algos might not be in C++ yet, check standard ones
+                standard_algos = (
+                    "Comet Median", "Simple Median (No Rejection)",
+                    "Simple Average (No Rejection)",
+                    "Weighted Windsorized Sigma Clipping",
+                    "Kappa-Sigma Clipping", 
+                    "Trimmed Mean", 
+                    "Extreme Studentized Deviate (ESD)",
+                    "Biweight Estimator",
+                    "Modified Z-Score Clipping",
+                    "Max Value"
+                )
+                
+                if use_cpp and algo in standard_algos:
+                    # Optimize Comet Median -> Median
+                    cpp_algo = algo
+                    if algo == "Comet Median": cpp_algo = "Simple Median (No Rejection)"
+                    
+                    if not ts.flags['C_CONTIGUOUS']:
+                         ts_c = np.ascontiguousarray(ts, dtype=np.float32)
+                    else:
+                         ts_c = ts
 
-                elif algo == "Comet High-Clip Percentile":
-                    k = self.settings.value("stacking/comet_hclip_k", 1.30, type=float)
-                    p = self.settings.value("stacking/comet_hclip_p", 25.0, type=float)
-                    # keep a small dict across tiles to reuse scratch buffers
-
-                    tile_result = _high_clip_percentile(ts, k=float(k), p=float(p))
-                    tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
-
-                elif algo == "Comet Lower-Trim (30%)":
-                    tile_result  = _lower_trimmed_mean(ts, trim_hi_frac=0.30)
-                    tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
-
-                elif algo == "Comet Percentile (40th)":
-                    tile_result  = _percentile40(ts)
-                    tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
-
-                elif algo == "Simple Average (No Rejection)":
-                    tile_result  = np.average(ts, axis=0, weights=weights_array)
-                    tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
-
-                elif algo == "Weighted Windsorized Sigma Clipping":
-                    tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
-                        ts, weights_array, lower=self.sigma_low, upper=self.sigma_high
+                    # Weights for comet are per-frame scalar usually?
+                    # weights_array is (N,) float32 constructed earlier.
+                    
+                    tile_result, tile_rej_map = CppStacker.process_stack(
+                        ts_c, 
+                        weights_array, 
+                        cpp_algo,
+                        sigma_low=float(self.sigma_low),
+                        sigma_high=float(self.sigma_high),
+                        iterations=int(self.iterations),
+                        kappa=float(self.kappa),
+                        trim_fraction=float(self.trim_fraction),
+                        esd_threshold=float(self.esd_threshold),
+                        biweight_constant=float(self.biweight_constant),
+                        modz_threshold=float(self.modz_threshold),
+                        max_val_threshold=1.0
                     )
-
-                elif algo == "Kappa-Sigma Clipping":
-                    tile_result, tile_rej_map = kappa_sigma_clip_weighted(
-                        ts, weights_array, kappa=self.kappa, iterations=self.iterations
-                    )
-
-                elif algo == "Trimmed Mean":
-                    tile_result, tile_rej_map = trimmed_mean_weighted(
-                        ts, weights_array, trim_fraction=self.trim_fraction
-                    )
-
-                elif algo == "Extreme Studentized Deviate (ESD)":
-                    tile_result, tile_rej_map = esd_clip_weighted(
-                        ts, weights_array, threshold=self.esd_threshold
-                    )
-
-                elif algo == "Biweight Estimator":
-                    tile_result, tile_rej_map = biweight_location_weighted(
-                        ts, weights_array, tuning_constant=self.biweight_constant
-                    )
-
-                elif algo == "Modified Z-Score Clipping":
-                    tile_result, tile_rej_map = modified_zscore_clip_weighted(
-                        ts, weights_array, threshold=self.modz_threshold
-                    )
-
-                elif algo == "Max Value":
-                    tile_result, tile_rej_map = max_value_stack(ts, weights_array)
-
                 else:
-                    # default to comet-safe median
-                    tile_result  = np.median(ts, axis=0)
-                    tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
+                    # Legacy / Specialized Comet Algo path
+                    if algo in ("Comet Median", "Simple Median (No Rejection)"):
+                        tile_result  = np.median(ts, axis=0)
+                        tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
+
+                    elif algo == "Comet High-Clip Percentile":
+                        k = self.settings.value("stacking/comet_hclip_k", 1.30, type=float)
+                        p = self.settings.value("stacking/comet_hclip_p", 25.0, type=float)
+                        tile_result = _high_clip_percentile(ts, k=float(k), p=float(p))
+                        tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
+
+                    elif algo == "Comet Lower-Trim (30%)":
+                        tile_result  = _lower_trimmed_mean(ts, trim_hi_frac=0.30)
+                        tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
+
+                    elif algo == "Comet Percentile (40th)":
+                        tile_result  = _percentile40(ts)
+                        tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
+
+                    elif algo == "Simple Average (No Rejection)":
+                        tile_result  = np.average(ts, axis=0, weights=weights_array)
+                        tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
+
+                    elif algo == "Weighted Windsorized Sigma Clipping":
+                        tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
+                            ts, weights_array, lower=self.sigma_low, upper=self.sigma_high
+                        )
+
+                    elif algo == "Kappa-Sigma Clipping":
+                        tile_result, tile_rej_map = kappa_sigma_clip_weighted(
+                            ts, weights_array, kappa=self.kappa, iterations=self.iterations
+                        )
+
+                    elif algo == "Trimmed Mean":
+                        tile_result, tile_rej_map = trimmed_mean_weighted(
+                            ts, weights_array, trim_fraction=self.trim_fraction
+                        )
+
+                    elif algo == "Extreme Studentized Deviate (ESD)":
+                        tile_result, tile_rej_map = esd_clip_weighted(
+                            ts, weights_array, threshold=self.esd_threshold
+                        )
+
+                    elif algo == "Biweight Estimator":
+                        tile_result, tile_rej_map = biweight_location_weighted(
+                            ts, weights_array, tuning_constant=self.biweight_constant
+                        )
+
+                    elif algo == "Modified Z-Score Clipping":
+                        tile_result, tile_rej_map = modified_zscore_clip_weighted(
+                            ts, weights_array, threshold=self.modz_threshold
+                        )
+
+                    elif algo == "Max Value":
+                        tile_result, tile_rej_map = max_value_stack(ts, weights_array)
+
+                    else:
+                        # default to comet-safe median
+                        tile_result  = np.median(ts, axis=0)
+                        tile_rej_map = np.zeros((len(file_list), th, tw), dtype=bool)
 
                 integrated_image[y0:y1, x0:x1, :] = tile_result
 
@@ -16526,46 +16581,72 @@ class StackingSuiteDialog(QDialog):
                         for _ in as_completed(futs):
                             pass
 
-                    # Rejection (unchanged – uses your Numba kernels)
+                    # Rejection (C++ Optimized)
                     algo = self.rejection_algorithm
-                    if algo == "Simple Median (No Rejection)":
-                        tile_result  = np.median(tile_stack, axis=0)
-                        tile_rej_map = np.zeros(tile_stack.shape[1:3], dtype=np.bool_)
-                    elif algo == "Simple Average (No Rejection)":
-                        tile_result  = np.average(tile_stack, axis=0, weights=weights_list)
-                        tile_rej_map = np.zeros(tile_stack.shape[1:3], dtype=np.bool_)
-                    elif algo == "Weighted Windsorized Sigma Clipping":
-                        tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
-                            tile_stack, weights_list, lower=self.sigma_low, upper=self.sigma_high
-                        )
-                    elif algo == "Kappa-Sigma Clipping":
-                        tile_result, tile_rej_map = kappa_sigma_clip_weighted(
-                            tile_stack, weights_list, kappa=self.kappa, iterations=self.iterations
-                        )
-                    elif algo == "Trimmed Mean":
-                        tile_result, tile_rej_map = trimmed_mean_weighted(
-                            tile_stack, weights_list, trim_fraction=self.trim_fraction
-                        )
-                    elif algo == "Extreme Studentized Deviate (ESD)":
-                        tile_result, tile_rej_map = esd_clip_weighted(
-                            tile_stack, weights_list, threshold=self.esd_threshold
-                        )
-                    elif algo == "Biweight Estimator":
-                        tile_result, tile_rej_map = biweight_location_weighted(
-                            tile_stack, weights_list, tuning_constant=self.biweight_constant
-                        )
-                    elif algo == "Modified Z-Score Clipping":
-                        tile_result, tile_rej_map = modified_zscore_clip_weighted(
-                            tile_stack, weights_list, threshold=self.modz_threshold
-                        )
-                    elif algo == "Max Value":
-                        tile_result, tile_rej_map = max_value_stack(
-                            tile_stack, weights_list
+                    
+                    if _HAS_CPP_STACKER:
+                         # Ensure inputs are contiguous float32 for C++
+                        if not tile_stack.flags['C_CONTIGUOUS']:
+                            tile_stack = np.ascontiguousarray(tile_stack, dtype=np.float32)
+                        
+                        # Weights must match stack dimensions or be per-frame (C++ handles both)
+                        # Ensure weights are float32
+                        w_arr = weights_list.astype(np.float32, copy=False) if isinstance(weights_list, np.ndarray) else np.array(weights_list, dtype=np.float32)
+
+                        tile_result, tile_rej_map = CppStacker.process_stack(
+                            tile_stack, 
+                            w_arr, 
+                            algo,
+                            sigma_low=float(self.sigma_low),
+                            sigma_high=float(self.sigma_high),
+                            iterations=int(self.iterations),
+                            kappa=float(self.kappa),
+                            trim_fraction=float(self.trim_fraction),
+                            esd_threshold=float(self.esd_threshold),
+                            biweight_constant=float(self.biweight_constant),
+                            modz_threshold=float(self.modz_threshold),
+                            max_val_threshold=1.0
                         )
                     else:
-                        tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
-                            tile_stack, weights_list, lower=self.sigma_low, upper=self.sigma_high
-                        )
+                        # Fallback to Numba
+                        if algo == "Simple Median (No Rejection)":
+                            tile_result  = np.median(tile_stack, axis=0)
+                            tile_rej_map = np.zeros(tile_stack.shape[1:3], dtype=np.bool_)
+                        elif algo == "Simple Average (No Rejection)":
+                            tile_result  = np.average(tile_stack, axis=0, weights=weights_list)
+                            tile_rej_map = np.zeros(tile_stack.shape[1:3], dtype=np.bool_)
+                        elif algo == "Weighted Windsorized Sigma Clipping":
+                            tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
+                                tile_stack, weights_list, lower=self.sigma_low, upper=self.sigma_high
+                            )
+                        elif algo == "Kappa-Sigma Clipping":
+                            tile_result, tile_rej_map = kappa_sigma_clip_weighted(
+                                tile_stack, weights_list, kappa=self.kappa, iterations=self.iterations
+                            )
+                        elif algo == "Trimmed Mean":
+                            tile_result, tile_rej_map = trimmed_mean_weighted(
+                                tile_stack, weights_list, trim_fraction=self.trim_fraction
+                            )
+                        elif algo == "Extreme Studentized Deviate (ESD)":
+                            tile_result, tile_rej_map = esd_clip_weighted(
+                                tile_stack, weights_list, threshold=self.esd_threshold
+                            )
+                        elif algo == "Biweight Estimator":
+                            tile_result, tile_rej_map = biweight_location_weighted(
+                                tile_stack, weights_list, tuning_constant=self.biweight_constant
+                            )
+                        elif algo == "Modified Z-Score Clipping":
+                            tile_result, tile_rej_map = modified_zscore_clip_weighted(
+                                tile_stack, weights_list, threshold=self.modz_threshold
+                            )
+                        elif algo == "Max Value":
+                            tile_result, tile_rej_map = max_value_stack(
+                                tile_stack, weights_list
+                            )
+                        else:
+                            tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
+                                tile_stack, weights_list, lower=self.sigma_low, upper=self.sigma_high
+                            )
 
                     # Ensure tile_result has correct shape
                     if tile_result.ndim == 2:

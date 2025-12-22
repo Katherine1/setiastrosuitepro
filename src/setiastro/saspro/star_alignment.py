@@ -114,6 +114,16 @@ from setiastro.saspro.legacy.numba_utils import (
 from setiastro.saspro.abe import _generate_sample_points as abe_generate_sample_points
 from setiastro.saspro.widgets.themed_buttons import themed_toolbtn
 
+# C++ Backend fallb_HAS_CPP = False
+try:
+    from setiastro.saspro.cpp import saspro_cpp as _cpp
+    CppStarAligner = _cpp.StarAligner
+    _HAS_CPP = True
+except ImportError:
+    CppStarAligner = None
+    _HAS_CPP = False
+
+
 # ---------------------------------------------------------------------
 # Small helpers to work with the *active view/document* (no slots)
 # ---------------------------------------------------------------------
@@ -388,16 +398,27 @@ def run_star_alignment_headless(mw, target_sw, preset: dict) -> bool:
         #    ref_small, tgt_small = ref_gray, tgt_gray
         ref_small, tgt_small = ref_gray, tgt_gray
         # ---------- find transform ----------
-        transform_obj, _pts = aa_find_transform_with_backoff(tgt_small, ref_small)
-        M2 = np.array(transform_obj.params[0:2, :], dtype=np.float64)  # keep full precision
-        #if ds > 1:
-        #    M2 = M2.copy()
-        #    M2[0, 2] *= ds
-        #    M2[1, 2] *= ds
-
-        # ---------- warp target like reference size ----------
-        ref_h, ref_w = ref_gray.shape[:2]
-        aligned = _warp_like_ref(tgt_img, M2, (ref_h, ref_w)).astype(np.float32, copy=False)
+        if _HAS_CPP:
+            # C++ Backend
+            aligner = CppStarAligner()
+            src_xy = aligner.detect_stars(tgt_small, max_stars=2000)
+            ref_xy = aligner.detect_stars(ref_small, max_stars=2000)
+            
+            M2_res, success = aligner.find_transform(src_xy, ref_xy)
+            if not success:
+                raise RuntimeError("Star Alignment (C++) failed to find a transform.")
+                
+            M2 = M2_res
+            # ---------- warp target like reference size ----------
+            ref_h, ref_w = ref_gray.shape[:2]
+            # Use C++ warper
+            aligned = aligner.warp_image(tgt_img, M2, (ref_h, ref_w))
+        else:
+            # Python legacy
+            transform_obj, _pts = aa_find_transform_with_backoff(tgt_small, ref_small)
+            M2 = np.array(transform_obj.params[0:2, :], dtype=np.float64)
+            ref_h, ref_w = ref_gray.shape[:2]
+            aligned = _warp_like_ref(tgt_img, M2, (ref_h, ref_w)).astype(np.float32, copy=False)
 
         # ---------- overwrite or create new ----------
         overwrite = bool((preset or {}).get("overwrite", False))
@@ -644,6 +665,8 @@ class StellarAlignmentDialog(QDialog):
         self.source_file_path = None
         self.target_file_path = None
         self._align_progress_in_slot = False
+        
+        self._cpp_aligner = CppStarAligner() if _HAS_CPP else None
 
         self.initUI()
 
@@ -1225,35 +1248,81 @@ class StellarAlignmentDialog(QDialog):
         #    src_small, tgt_small = src_gray, tgt_gray
         src_small, tgt_small = src_gray, tgt_gray
 
-        self.status_label.setText("Computing alignment with astroalign…")
+        self.status_label.setText("Computing alignment...")
         QApplication.processEvents()
-        try:
-            # NOTE: astroalign returns matched points as (src_pts, tgt_pts)
-            #       but we called it with (tgt_small, src_small), so:
-            #       src_pts are in tgt_small coords, tgt_pts in src_small coords
-            transform_obj, (src_pts_s, tgt_pts_s) = self.aa_find_transform_with_backoff(tgt_small, src_small)
-        except Exception as e:
-            QMessageBox.warning(self, "Alignment Error", f"Astroalign failed: {e}")
-            return
 
-        # Convert to float32 arrays
-        src_xy = np.asarray(src_pts_s, dtype=np.float32)
-        tgt_xy = np.asarray(tgt_pts_s, dtype=np.float32)
+        # C++ Fast Path
+        if self._cpp_aligner is not None:
+             try:
+                 # Detect
+                 s_gray = src_gray.astype(np.float32)
+                 t_gray = tgt_gray.astype(np.float32)
+                 
+                 s_stars = self._cpp_aligner.detect_stars(s_gray, max_stars=max_cp)
+                 t_stars = self._cpp_aligner.detect_stars(t_gray, max_stars=max_cp)
+                 
+                 success = False
+                 res = None
+                 
+                 if model in ("affine", "homography"):
+                     use_h = (model == "homography")
+                     res, success = self._cpp_aligner.find_transform(t_stars, s_stars, use_homography=use_h)
+                 elif model in ("poly3", "poly4"):
+                     order = 3 if model == "poly3" else 4
+                     res, success = self._cpp_aligner.find_polynomial_transform(t_stars, s_stars, order=order)
 
-        # Cap control points
-        src_xy, tgt_xy = _cap_points(src_xy, tgt_xy, max_cp)
+                 if success:
+                     self.status_label.setText(f"Warping target image (C++ {model})...")
+                     QApplication.processEvents()
+                     
+                     H_ref, W_ref = src.shape[:2]
+                     
+                     if model in ("affine", "homography"):
+                         aligned = self._cpp_aligner.warp_image(tgt, res, (H_ref, W_ref))
+                     else:
+                         aligned = self._cpp_aligner.warp_image_polynomial(tgt, res, (H_ref, W_ref))
 
-        # If we solved on a downsampled pair, re-fit transform at full resolution for accuracy
-        #if ds > 1:
-        #    src_xy *= ds
-        #    tgt_xy *= ds
+                     # Convert to float32 for display/pipeline
+                     aligned = aligned.astype(np.float32, copy=False)
 
-        # Estimate chosen transform on (possibly rescaled) full-res pairs
-        try:
-            kind, X = _estimate_transform_from_pairs(model, src_xy, tgt_xy, h_reproj)
-        except Exception as e:
-            QMessageBox.warning(self, "Alignment Error", f"Transform estimation failed: {e}")
-            return
+                     # Store + preview
+                     self.aligned_image = aligned
+                     self.stretched_image = None
+                     if self.autostretch_enabled:
+                         self.apply_autostretch()
+                    
+                     disp = self.stretched_image if (self.autostretch_enabled and self.stretched_image is not None) else self.aligned_image
+                     self.update_preview(self.result_preview_label, disp)
+                     self.status_label.setText(f"Alignment complete ({model}).")
+                     QApplication.processEvents()
+                     QMessageBox.information(self, "Alignment Complete", f"Alignment completed using {model} (C++).")
+                     return  # EXIT early on success
+
+                 else:
+                     print("C++ alignment found no solution, falling back.")
+
+             except Exception as e:
+                 print(f"C++ alignment failed: {e}")
+                 import traceback
+                 traceback.print_exc()
+                 # Fallback
+        
+        # Original Python Path (fallback)
+        if 'X' not in locals():
+             try:
+                 if self._cpp_aligner and model in ("affine", "homography"):
+                     # Re-attempting logic inside try block above didn't work or failed
+                     pass
+                     
+                 # ... existing astroalign logic ...
+                 transform_obj, (src_pts_s, tgt_pts_s) = self.aa_find_transform_with_backoff(tgt_small, src_small)
+                 src_xy = np.asarray(src_pts_s, dtype=np.float32)
+                 tgt_xy = np.asarray(tgt_pts_s, dtype=np.float32)
+                 src_xy, tgt_xy = _cap_points(src_xy, tgt_xy, max_cp)
+                 kind, X = _estimate_transform_from_pairs(model, src_xy, tgt_xy, h_reproj)
+             except Exception as e:
+                 QMessageBox.warning(self, "Alignment Error", f"Alignment failed: {e}")
+                 return
 
         self.status_label.setText("Warping target image…")
         QApplication.processEvents()

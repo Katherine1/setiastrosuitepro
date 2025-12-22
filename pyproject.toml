@@ -82,8 +82,18 @@ opencv-python-headless = "*"
 pytest = "*"
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[build-system]
+requires = ["scikit-build-core", "pybind11", "cmake", "ninja"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+cmake.version = ">=3.15"
+ninja.version = ">=1.5"
+wheel.packages = ["src/setiastro"]
+experimental = true
+
+[tool.scikit-build.metadata.version]
+provider = "poetry"
 
 [tool.poetry.extras]
 # Optional extras can be added here if needed in the future
