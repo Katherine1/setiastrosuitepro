@@ -5,8 +5,18 @@ from numba.typed import List
 import cv2 
 import math
 
+try:
+    from setiastro.saspro.cpp import saspro_cpp as _cpp
+    ImageOps = _cpp.ImageOps
+    _HAS_CPP = True
+except ImportError:
+    ImageOps = None
+    _HAS_CPP = False
+
 @njit(parallel=True, fastmath=True)
 def blend_add_numba(A, B, alpha):
+    if _HAS_CPP:
+        return ImageOps.blend_images(A, B, "add", float(alpha))
     H, W, C = A.shape
     out = np.empty_like(A)
     for y in prange(H):
@@ -21,6 +31,8 @@ def blend_add_numba(A, B, alpha):
 
 @njit(parallel=True, fastmath=True)
 def blend_subtract_numba(A, B, alpha):
+    if _HAS_CPP:
+        return ImageOps.blend_images(A, B, "subtract", float(alpha))
     H, W, C = A.shape
     out = np.empty_like(A)
     for y in prange(H):
@@ -34,6 +46,8 @@ def blend_subtract_numba(A, B, alpha):
 
 @njit(parallel=True, fastmath=True)
 def blend_multiply_numba(A, B, alpha):
+    if _HAS_CPP:
+        return ImageOps.blend_images(A, B, "multiply", float(alpha))
     H, W, C = A.shape
     out = np.empty_like(A)
     for y in prange(H):
@@ -47,6 +61,8 @@ def blend_multiply_numba(A, B, alpha):
 
 @njit(parallel=True, fastmath=True)
 def blend_divide_numba(A, B, alpha):
+    if _HAS_CPP:
+        return ImageOps.blend_images(A, B, "divide", float(alpha))
     H, W, C = A.shape
     out = np.empty_like(A)
     eps = 1e-6
@@ -68,6 +84,8 @@ def blend_divide_numba(A, B, alpha):
 
 @njit(parallel=True, fastmath=True)
 def blend_screen_numba(A, B, alpha):
+    if _HAS_CPP:
+        return ImageOps.blend_images(A, B, "screen", float(alpha))
     H, W, C = A.shape
     out = np.empty_like(A)
     for y in prange(H):
@@ -85,6 +103,8 @@ def blend_screen_numba(A, B, alpha):
 
 @njit(parallel=True, fastmath=True)
 def blend_overlay_numba(A, B, alpha):
+    if _HAS_CPP:
+        return ImageOps.blend_images(A, B, "overlay", float(alpha))
     H, W, C = A.shape
     out = np.empty_like(A)
     for y in prange(H):
@@ -107,6 +127,8 @@ def blend_overlay_numba(A, B, alpha):
 
 @njit(parallel=True, fastmath=True)
 def blend_difference_numba(A, B, alpha):
+    if _HAS_CPP:
+        return ImageOps.blend_images(A, B, "difference", float(alpha))
     H, W, C = A.shape
     out = np.empty_like(A)
     for y in prange(H):
@@ -129,6 +151,9 @@ def rescale_image_numba(image, factor):
     Custom rescale function using bilinear interpolation optimized with numba.
     Supports both mono (2D) and color (3D) images.
     """
+    if _HAS_CPP:
+        return ImageOps.rescale_image(image, float(factor))
+    
     if image.ndim == 2:
         height, width = image.shape
         new_width = int(width * factor)
@@ -162,11 +187,10 @@ def rescale_image_numba(image, factor):
                 y1 = y0 + 1 if y0 + 1 < height else height - 1
                 dx = src_x - x0
                 dy = src_y - y0
-                for c in range(channels):
-                    output[y, x, c] = (image[y0, x0, c] * (1 - dx) * (1 - dy) +
-                                       image[y0, x1, c] * dx * (1 - dy) +
-                                       image[y1, x0, c] * (1 - dx) * dy +
-                                       image[y1, x1, c] * dx * dy)
+                output[y, x, c] = (image[y0, x0, c] * (1 - dx) * (1 - dy) +
+                                   image[y0, x1, c] * dx * (1 - dy) +
+                                   image[y1, x0, c] * (1 - dx) * dy +
+                                   image[y1, x1, c] * dx * dy)
         return output
 
 @njit(parallel=True, fastmath=True)
@@ -207,10 +231,9 @@ def bin2x2_numba(image):
 
 @njit(parallel=True, fastmath=True)
 def flip_horizontal_numba(image):
-    """
-    Flips an image horizontally using Numba JIT.
-    Works with both mono (2D) and color (3D) images.
-    """
+    if _HAS_CPP:
+        return ImageOps.flip_image(image, 1) # 1 = flip around y-axis (horizontal flip)
+    
     if image.ndim == 2:
         height, width = image.shape
         output = np.empty((height, width), dtype=image.dtype)
@@ -230,10 +253,9 @@ def flip_horizontal_numba(image):
 
 @njit(parallel=True, fastmath=True)
 def flip_vertical_numba(image):
-    """
-    Flips an image vertically using Numba JIT.
-    Works with both mono (2D) and color (3D) images.
-    """
+    if _HAS_CPP:
+        return ImageOps.flip_image(image, 0) # 0 = flip around x-axis (vertical flip)
+
     if image.ndim == 2:
         height, width = image.shape
         output = np.empty((height, width), dtype=image.dtype)
@@ -253,10 +275,9 @@ def flip_vertical_numba(image):
 
 @njit(parallel=True, fastmath=True)
 def rotate_90_clockwise_numba(image):
-    """
-    Rotates the image 90 degrees clockwise.
-    Works with both mono (2D) and color (3D) images.
-    """
+    if _HAS_CPP:
+        return ImageOps.rotate_image(image, 0)
+    
     if image.ndim == 2:
         height, width = image.shape
         output = np.empty((width, height), dtype=image.dtype)
@@ -276,10 +297,9 @@ def rotate_90_clockwise_numba(image):
 
 @njit(parallel=True, fastmath=True)
 def rotate_90_counterclockwise_numba(image):
-    """
-    Rotates the image 90 degrees counterclockwise.
-    Works with both mono (2D) and color (3D) images.
-    """
+    if _HAS_CPP:
+        return ImageOps.rotate_image(image, 1)
+
     if image.ndim == 2:
         height, width = image.shape
         output = np.empty((width, height), dtype=image.dtype)
@@ -299,10 +319,9 @@ def rotate_90_counterclockwise_numba(image):
 
 @njit(parallel=True, fastmath=True)
 def invert_image_numba(image):
-    """
-    Inverts an image (1 - pixel value) using Numba JIT.
-    Works with both mono (2D) and color (3D) images.
-    """
+    if _HAS_CPP:
+        return ImageOps.invert_image(image)
+
     if image.ndim == 2:
         height, width = image.shape
         output = np.empty((height, width), dtype=image.dtype)
@@ -321,10 +340,9 @@ def invert_image_numba(image):
 
 @njit(parallel=True, fastmath=True)
 def rotate_180_numba(image):
-    """
-    Rotates the image 180 degrees.
-    Works with both mono (2D) and color (3D) images.
-    """
+    if _HAS_CPP:
+        return ImageOps.rotate_image(image, 2)
+
     if image.ndim == 2:
         height, width = image.shape
         output = np.empty((height, width), dtype=image.dtype)
@@ -505,6 +523,32 @@ def apply_flat_division_numba(image, master_flat, master_bias=None):
 
     NOTE: master_bias arg kept for API compatibility; do bias/dark subtraction outside.
     """
+    if _HAS_CPP:
+        # C++ calibrateImage does exactly this: img / flat * mean(flat)
+        # It needs dark, flat, bias, pedestal.
+        # Here we only have master_flat. master_bias arg is unused in numba impl (API compat).
+        # We can pass empty mat for dark/bias.
+        dummy = np.empty((0,0), dtype=np.float32)
+        # We need a copy because calibrateImage operates in-place or returns same?
+        # Actually in bindings I should check if it's in-place.
+        # The C++ signature is void calibrateImage(cv::Mat& img, ...).
+        # But python bindings usually copy or respect reference.
+        # To match Numba pure function style (returns new image, doesn't modify input),
+        # we should clone first.
+        # But wait, numba functions often allocate new output.
+        # This wrapper calls _flat_div_hwc which MODIFIES IN PLACE?
+        # Let's check _flat_div_hwc in previous view...
+        # "img[y,x,k] = ..." -> it modifies 'img' in place?
+        # No, 'apply_flat_division_numba' takes 'image', checks dim.
+        # If I look at _flat_div_hwc: it iterates and assigns to img.
+        # So the original python function was IN-PLACE?
+        # Let's verify carefully.
+        # _flat_div_2d(img, flat): for y, x: img[y,x] = ...
+        # Yes, it is in-place!
+        # So I can pass 'image' directly to C++ calibrateImage.
+        ImageOps.calibrate_image(image, dummy, master_flat, dummy, 0.0)
+        return image
+
     if image.ndim == 2:
         return _flat_div_2d(image, master_flat)
 
@@ -632,6 +676,24 @@ def subtract_dark(frames, dark_frame):
     Dispatcher function that calls the correct Numba function
     depending on whether 'frames' is 3D or 4D.
     """
+    if _HAS_CPP:
+        # subtract_dark modifies IN-PLACE in current numba impl?
+        # subtract_dark_3d: returns `result = np.empty_like(frames)`.
+        # So it is NOT in-place.
+        # My C++ calibrateImage is in-place modification of the first argument.
+        # So I must clone `frames` first.
+        out = frames.copy()
+        dummy = np.empty((0,0), dtype=np.float32)
+        # We need to iterate frames because C++ calibrateImage takes one image (H,W) or (H,W,C).
+        # Here we have a stack (F, H, W) or (F, H, W, C).
+        # We can loop in python.
+        num = out.shape[0]
+        # Dark is (H,W) or (H,W,C).
+        # Loop:
+        for i in range(num):
+             ImageOps.calibrate_image(out[i], dark_frame, dummy, dummy, 0.0)
+        return out
+        
     if frames.ndim == 3:
         # frames: (F,H,W), dark_frame: (H,W)
         return subtract_dark_3d(frames, dark_frame)

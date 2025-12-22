@@ -1,11 +1,19 @@
+
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
-#include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 #include <vector>
 #include <algorithm>
 #include <iostream>
 #include <map>
 #include <tuple>
+#include "stacking.hpp"
+#include "image_ops.hpp"
+#include "deconvolver.hpp"
+#include "background_extractor.hpp"
+#include "live_stacker.hpp"
 
 namespace py = pybind11;
 
@@ -329,22 +337,22 @@ public:
 
         // Estimate Rigid/Affine/Homography
         cv::Mat mask;
-        cv::Mat H;
+        cv::Mat HomographyMat;
         if (use_homography) {
-            H = cv::findHomography(p_src, p_ref, cv::RANSAC, 5.0, mask);
+            HomographyMat = cv::findHomography(p_src, p_ref, cv::RANSAC, 5.0, mask);
         } else {
-            H = cv::estimateAffine2D(p_src, p_ref, mask, cv::RANSAC, 5.0);
+            HomographyMat = cv::estimateAffine2D(p_src, p_ref, mask, cv::RANSAC, 5.0);
         }
 
-        if (H.empty()) return py::make_tuple(py::none(), false);
+        if (HomographyMat.empty()) return py::make_tuple(py::none(), false);
         
         // Convert to numpy
         // H is CV_64F usually
-        py::array_t<double> result = py::array_t<double>({H.rows, H.cols});
+        py::array_t<double> result = py::array_t<double>({HomographyMat.rows, HomographyMat.cols});
         auto r = result.mutable_unchecked<2>();
-        for (int i = 0; i < H.rows; i++)
-            for (int j = 0; j < H.cols; j++)
-                r(i, j) = H.at<double>(i, j);
+        for (int i = 0; i < HomographyMat.rows; i++)
+            for (int j = 0; j < HomographyMat.cols; j++)
+                r(i, j) = HomographyMat.at<double>(i, j);
 
         return py::make_tuple(result, true);
     }
@@ -672,7 +680,58 @@ PYBIND11_MODULE(saspro_cpp, m) {
         .def("find_polynomial_transform", &StarAligner::findPolynomialTransform,
             py::arg("src_stars"), py::arg("dst_stars"), py::arg("src_shape"), py::arg("dst_shape"), py::arg("order") = 3,
             "Find polynomial transform (order 3 or 4).")
-        .def("warp_image_polynomial", &StarAligner::warpImagePolynomial,
-            py::arg("image"), py::arg("coeffs"), py::arg("output_shape"), py::arg("order") = 3,
-            "Warp image using polynomial coefficients using geometric remap.");
+        //.def("warp_image_polynomial", (py::array (StarAligner::*)(const py::array&, const py::dict&, std::tuple<int, int>)) &StarAligner::warpImagePolynomial,
+        //    py::arg("image"), py::arg("poly_def"), py::arg("output_shape"),
+        //    "Warp image using polynomial coefficients using geometric remap.");
+
+    // --- ImageOps ---
+    py::class_<saspro::ImageOps>(m, "ImageOps")
+        .def_static("blend_images", &saspro::ImageOps::blendImages, py::arg("A"), py::arg("B"), py::arg("mode"), py::arg("opacity"))
+        .def_static("flip_image", &saspro::ImageOps::flipImage, py::arg("img"), py::arg("axis"))
+        .def_static("rotate_image", &saspro::ImageOps::rotateImage, py::arg("img"), py::arg("flag"))
+        .def_static("invert_image", &saspro::ImageOps::invertImage, py::arg("img"))
+        .def_static("calibrate_image", &saspro::ImageOps::calibrateImage, py::arg("img"), py::arg("dark")=cv::Mat(), py::arg("flat")=cv::Mat(), py::arg("bias")=cv::Mat(), py::arg("pedestal")=0.0f)
+        .def_static("rescale_image", &saspro::ImageOps::rescaleImage, py::arg("img"), py::arg("factor"));
+
+    // --- Deconvolver ---
+    py::class_<saspro::Deconvolver>(m, "Deconvolver")
+        .def_static("richardson_lucy", &saspro::Deconvolver::richardsonLucy, py::arg("img"), py::arg("psf"), py::arg("iterations"), py::arg("use_tv_reg")=false, py::arg("tv_weight")=0.002f)
+        .def_static("wiener", &saspro::Deconvolver::wiener, py::arg("img"), py::arg("psf"), py::arg("snr"))
+        .def_static("van_cittert", &saspro::Deconvolver::vanCittert, py::arg("img"), py::arg("psf"), py::arg("iterations"), py::arg("relaxation"));
+
+    // --- BackgroundExtractor ---
+    py::class_<saspro::BackgroundExtractor>(m, "BackgroundExtractor")
+        .def(py::init<>())
+        .def_static("fit_polynomial", &saspro::BackgroundExtractor::fitPolynomial, py::arg("points"), py::arg("degree"))
+        .def_static("evaluate_polynomial", &saspro::BackgroundExtractor::evaluatePolynomial, py::arg("width"), py::arg("height"), py::arg("coeffs"), py::arg("degree"))
+        .def_static("generate_rbf_model", [](int w, int h, py::array_t<float> pts, float smooth){
+            py::buffer_info buf = pts.request();
+            if (buf.ndim != 2 || buf.shape[1] != 3) throw std::runtime_error("Points must be Nx3 array");
+            float* ptr = static_cast<float*>(buf.ptr);
+            std::vector<saspro::BackgroundExtractor::Point> vec(buf.shape[0]);
+            for(int i=0; i<buf.shape[0]; i++) {
+                vec[i] = {ptr[i*3], ptr[i*3+1], ptr[i*3+2]};
+            }
+            return saspro::BackgroundExtractor::generateRBFModel(w, h, vec, smooth);
+        }, py::arg("width"), py::arg("height"), py::arg("points"), py::arg("smoothing"))
+        .def_static("generate_sample_points", [](const cv::Mat& img, int box, int step, float sigma){
+             auto pts = saspro::BackgroundExtractor::generateSamplePoints(img, box, step, sigma);
+             std::vector<py::ssize_t> shape = {(py::ssize_t)pts.size(), 3};
+             py::array_t<float> ret(shape);
+             auto r = ret.mutable_unchecked<2>();
+             for(py::ssize_t i=0; i<(py::ssize_t)pts.size(); i++) {
+                 r(i,0) = pts[i].x; r(i,1) = pts[i].y; r(i,2) = pts[i].value;
+             }
+             return ret;
+        }, py::arg("img"), py::arg("box_size"), py::arg("grid_step"), py::arg("sigma_clip"));
+
+    // --- LiveStacker ---
+    py::class_<saspro::LiveStacker>(m, "LiveStacker")
+        .def(py::init<>())
+        .def("reset", &saspro::LiveStacker::reset)
+        .def("add_frame", &saspro::LiveStacker::addFrame, py::arg("image"))
+        .def("get_mean", &saspro::LiveStacker::getMean)
+        .def("get_sigma", &saspro::LiveStacker::getSigma)
+        .def("set_sigma_clip", &saspro::LiveStacker::setSigmaClip, py::arg("threshold"))
+        .def_property_readonly("frame_count", &saspro::LiveStacker::getFrameCount);
 }

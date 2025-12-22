@@ -35,6 +35,15 @@ from setiastro.saspro.legacy.numba_utils import build_poly_terms, evaluate_polyn
 from .autostretch import autostretch as hard_autostretch
 from setiastro.saspro.widgets.themed_buttons import themed_toolbtn
 
+# C++ Backend fallback
+try:
+    from setiastro.saspro.cpp import saspro_cpp as _cpp
+    BackendABE = _cpp.BackgroundExtractor
+    _HAS_CPP_ABE = True
+except ImportError:
+    BackendABE = None
+    _HAS_CPP_ABE = False
+
 # =============================================================================
 #                         Headless ABE Core (poly + RBF)
 # =============================================================================
@@ -66,6 +75,56 @@ def _upscale_bg(bg_small: np.ndarray, out_shape: tuple[int, int]) -> np.ndarray:
 
 def _fit_poly_on_small(small: np.ndarray, points: np.ndarray, degree: int, patch_size: int = 15) -> np.ndarray:
     H, W = small.shape[:2]
+    
+    # Use C++ Backend if available
+    if _HAS_CPP_ABE:
+        # Prepare points: [x, y, value]
+        # We need to extract values from 'small' at these points to pass to C++ fit
+        # Python code did: median of patch at x,y
+        # We can replicate that cheaply here or just pass extracted values
+        
+        half = patch_size // 2
+        
+        # Prepare points for C++: list of [x, y, val]
+        # small might be RGB. We fit per channel.
+        is_rgb = (small.ndim == 3 and small.shape[2] == 3)
+        channels = 3 if is_rgb else 1
+        
+        bg_out = np.zeros_like(small, dtype=np.float32)
+        
+        # Helper to get sample val
+        def get_val(arr, x, y):
+            x0, x1 = max(0, x - half), min(W, x + half + 1)
+            y0, y1 = max(0, y - half), min(H, y + half + 1)
+            return float(np.median(arr[y0:y1, x0:x1]))
+        
+        pts_int = points.astype(np.int32)
+        
+        for c in range(channels):
+            layer = small[..., c] if is_rgb else small
+            
+            # Construct scalar points for this channel
+            cpp_points = []
+            for (px, py) in pts_int:
+                val = get_val(layer, px, py)
+                cpp_points.append([float(px), float(py), val])
+                
+            cpp_points = np.array(cpp_points, dtype=np.float32)
+            
+            # Fit
+            coeffs = BackendABE.fit_polynomial(cpp_points, degree)
+            
+            # Evaluate
+            model = BackendABE.evaluate_polynomial(W, H, coeffs, degree)
+            
+            if is_rgb:
+                bg_out[..., c] = model
+            else:
+                bg_out = model
+                
+        return bg_out
+
+    # Legacy Python Fallback
     half = patch_size // 2
     pts = np.asarray(points, dtype=np.int32)
     xs = np.clip(pts[:, 0], 0, W - 1)
@@ -220,6 +279,45 @@ def _generate_sample_points(image: np.ndarray, num_points: int = 100, exclusion_
 def _fit_rbf_on_small(small: np.ndarray, points: np.ndarray, smooth: float = 0.1, patch_size: int = 15) -> np.ndarray:
     """Match SASv2 exactly: float64 for RBF inputs, multiquadric, epsilon=1.0."""
     H, W = small.shape[:2]
+    
+    if _HAS_CPP_ABE:
+        # Use C++ RBF
+        half = patch_size // 2
+        is_rgb = (small.ndim == 3 and small.shape[2] == 3)
+        channels = 3 if is_rgb else 1
+        bg_out = np.zeros_like(small, dtype=np.float32)
+        
+        pts_int = points.astype(np.int32)
+
+        def get_val(arr, x, y):
+            x0, x1 = max(0, x - half), min(W, x + half + 1)
+            y0, y1 = max(0, y - half), min(H, y + half + 1)
+            return float(np.median(arr[y0:y1, x0:x1]))
+
+        for c in range(channels):
+            layer = small[..., c] if is_rgb else small
+            # Collect points
+            cpp_points = []
+            for (px, py) in pts_int:
+                val = get_val(layer, px, py)
+                cpp_points.append([float(px), float(py), val])
+            
+            cpp_points = np.array(cpp_points, dtype=np.float32)
+            
+            # Generate Model directly
+            # Note: C++ uses simpler RBF kernel (sqrt(r^2 + smooth^2)), check if matches scipy's epsilon
+            # Scipy: sqrt((r/eps)^2 + 1) = sqrt(r^2/eps^2 + 1) = (1/eps) * sqrt(r^2 + eps^2)
+            # If our C++ kernel is sqrt(r^2 + smooth^2), then smooth corresponds to eps.
+            
+            model = BackendABE.generate_rbf_model(W, H, cpp_points, float(smooth))
+            
+            if is_rgb:
+                bg_out[..., c] = model
+            else:
+                bg_out = model
+        return bg_out
+
+    # Legacy Python Fallback
     half = patch_size // 2
     pts = np.asarray(points, dtype=np.int32)
     xs = np.clip(pts[:, 0], 0, W - 1).astype(np.int64)

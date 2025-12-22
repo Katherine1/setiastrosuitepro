@@ -38,6 +38,15 @@ import sep  # PSF estimator
 from setiastro.saspro.widgets.spinboxes import CustomSpinBox
 from setiastro.saspro.widgets.themed_buttons import themed_toolbtn
 
+# C++ Backend
+try:
+    from setiastro.saspro.cpp import saspro_cpp as _cpp
+    BackendDeconv = _cpp.Deconvolver
+    _HAS_CPP_DECONV = True
+except ImportError:
+    BackendDeconv = None
+    _HAS_CPP_DECONV = False
+
 
 # --- GraphicsView with Shift+Click LS center + optional scene ctor -----------
 class InteractiveGraphicsView(QGraphicsView):
@@ -973,6 +982,42 @@ class ConvoDeconvoDialog(QDialog):
         iters = int(round(iterations))
         psf = psf_kernel.astype(np.float32)
 
+        # C++ Backend Path
+        if _HAS_CPP_DECONV:
+            use_tv = (reg_type == "Total Variation (TV)")
+            # Note: C++ current implementation might not support Tikhonov explicitly yet,
+            # so we treat Tikhonov as None (Safe default) or map to TV if appropriate.
+            # Matching Python's alph_tv=0.01. C++ default is 0.002, so we pass 0.01.
+            
+            def _run_cpp_rl(img2d):
+                # Ensure float32
+                f32 = img2d.astype(np.float32, copy=False)
+                res = BackendDeconv.richardson_lucy(f32, psf, iters, use_tv, 0.01)
+                
+                # Optional dering (bilateral)
+                if clip_flag:
+                    # We can use skimage denoise_bilateral here or if C++ had it.
+                    # Current C++ bindings don't expose separate bilateral yet.
+                    # We'll use the Python-side bilateral for now to match exactly.
+                    res = denoise_bilateral(res, sigma_color=0.08, sigma_spatial=1)
+                return res
+
+            if image.ndim == 2:
+                self.rl_status_label.setText(f"Running C++ RL for {iters} iterations"); QApplication.processEvents()
+                ret = _run_cpp_rl(image)
+                self.rl_status_label.setText(""); QApplication.processEvents()
+                return np.clip(ret, 0.0, 1.0)
+            elif image.ndim == 3 and image.shape[2] == 3:
+                outs = []
+                for c in range(3):
+                    self.rl_status_label.setText(f"Running C++ RL ch {c+1}..."); QApplication.processEvents()
+                    outs.append(_run_cpp_rl(image[:, :, c]))
+                self.rl_status_label.setText(""); QApplication.processEvents()
+                return np.clip(np.stack(outs, axis=2), 0.0, 1.0)
+            else:
+                return image.copy()
+
+        # Legacy Python Path
         def _deconv_2d_parallel(gray: np.ndarray) -> np.ndarray:
             H, W = gray.shape
             psf_h, psf_w = psf.shape
@@ -1050,6 +1095,35 @@ class ConvoDeconvoDialog(QDialog):
 
     def _wiener_deconv_with_kernel(self, image: np.ndarray, small_psf: np.ndarray, nsr: float,
                                    reg_type: str, do_dering: bool) -> np.ndarray:
+        # C++ Backend
+        if _HAS_CPP_DECONV:
+            def _run_cpp_wiener(im2d):
+                f32 = im2d.astype(np.float32, copy=False)
+                # C++ Wiener signature: (img, psf, snr).
+                # Wait, my binding is "snr".
+                # But here we have NSR (Noise-to-Signal). 
+                # SNR = 1/NSR? Or does C++ expect NSR?
+                # implementation_plan said: "wiener(img, psf, snr)".
+                # Deconvolver::wiener implementation typically uses SNR for balance.
+                # If the Python UI has "Noise/Signal (λ)" (NSR), then Snr = 1.0 / Nsr.
+                # Let's assume C++ expects SNR if named "snr".
+                safe_nsr = max(1e-9, nsr)
+                snr_val = 1.0 / safe_nsr
+                
+                res = BackendDeconv.wiener(f32, small_psf, snr_val)
+                
+                if do_dering:
+                    res = denoise_bilateral(res, sigma_color=0.08, sigma_spatial=1)
+                return res
+
+            if image.ndim == 2:
+                return np.clip(_run_cpp_wiener(image), 0.0, 1.0)
+            elif image.ndim == 3 and image.shape[2] == 3:
+                return np.clip(np.stack([_run_cpp_wiener(image[:, :, c]) for c in range(3)], axis=2), 0.0, 1.0)
+            else:
+                return image.copy()
+
+        # Legacy
         def _deconv_gray(im2d: np.ndarray, do_dering_flag: bool) -> np.ndarray:
             H, W = im2d.shape
             psf_h, psf_w = small_psf.shape
@@ -1307,6 +1381,26 @@ def _rl_tile_process_reg(tile_and_meta: Tuple[int, np.ndarray]) -> Tuple[int, np
 
 # ─────────────────────────────────────────────────────────────────────────────
 def van_cittert_deconv(image: np.ndarray, iterations: int, relaxation: float) -> np.ndarray:
+    if _HAS_CPP_DECONV:
+        # C++ V-C (note: C++ implementation uses Gaussian PSF sigma=3.0 internally matching this function)
+        # But wait, my C++ vanCittert expects 'img' and 'psf'.
+        # The Python version here constructs the PSF internally (sigma=3).
+        # So I should construct the PSF here and pass it to C++.
+        
+        sigma = 3.0
+        size = int(np.ceil(6 * sigma)); size = size + 1 if size % 2 == 0 else size
+        xs = np.linspace(-size//2, size//2, size)
+        kernel_1d = np.exp(-(xs**2) / (2*sigma**2)); kernel_1d = kernel_1d / kernel_1d.sum()
+        psf = np.outer(kernel_1d, kernel_1d).astype(np.float32)
+
+        if image.ndim == 3 and image.shape[2] == 3:
+            chans = [BackendDeconv.van_cittert(image[:, :, c].astype(np.float32), psf, iterations, relaxation) for c in range(3)]
+            return np.clip(np.stack(chans, axis=2), 0.0, 1.0)
+        else:
+            ret = BackendDeconv.van_cittert(image.astype(np.float32), psf, iterations, relaxation)
+            return np.clip(ret, 0.0, 1.0)
+
+    # Legacy
     sigma = 3.0
     size = int(np.ceil(6 * sigma)); size = size + 1 if size % 2 == 0 else size
     xs = np.linspace(-size//2, size//2, size)

@@ -52,11 +52,22 @@ __numba_cache__/
 
 # Build artifacts
 build/
+build_manual/
 dist/
 *.egg-info/
 *.egg
 *.whl
 *.spec.bak
+
+# C++ build artifacts
+*.pyd
+*.so
+*.dylib
+_skbuild/
+CMakeCache.txt
+CMakeFiles/
+*.ninja*
+compile_commands.json
 
 # PyInstaller
 *.manifest

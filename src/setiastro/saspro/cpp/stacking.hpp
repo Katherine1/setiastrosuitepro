@@ -47,11 +47,11 @@ private:
     static Algo parseAlgo(const std::string& name);
     
     // Internal implementations
-    static void algoMean(const float* stack_ptr, const float* weight_ptr, int F, int H, int W, int C, float* out_ptr);
-    static void algoMedian(const float* stack_ptr, int F, int H, int W, int C, float* out_ptr);
-    static void algoSigmaClip(const float* stack_ptr, const float* weight_ptr, int F, int H, int W, int C, float* out_ptr, bool* rej_ptr, float kappa, int iters);
-    static void algoWindsorized(const float* stack_ptr, const float* weight_ptr, int F, int H, int W, int C, float* out_ptr, bool* rej_ptr, float low, float high, int iters);
-    static void algoTrimmedMean(const float* stack_ptr, const float* weight_ptr, int F, int H, int W, int C, float* out_ptr, bool* rej_ptr, float trim_frac);
-    static void algoESD(const float* stack_ptr, const float* weight_ptr, int F, int H, int W, int C, float* out_ptr, bool* rej_ptr, float threshold);
+    static void algoMean(const float* stack_ptr, const float* weight_ptr, int StackDepth, int StackHeight, int StackWidth, int StackChannels, float* out_ptr);
+    static void algoMedian(const float* stack_ptr, int StackDepth, int StackHeight, int StackWidth, int StackChannels, float* out_ptr);
+    static void algoSigmaClip(const float* stack_ptr, const float* weight_ptr, int StackDepth, int StackHeight, int StackWidth, int StackChannels, float* out_ptr, bool* rej_ptr, float kappa, int iters);
+    static void algoWindsorized(const float* stack_ptr, const float* weight_ptr, int StackDepth, int StackHeight, int StackWidth, int StackChannels, float* out_ptr, bool* rej_ptr, float low, float high, int iters);
+    static void algoTrimmedMean(const float* stack_ptr, const float* weight_ptr, int StackDepth, int StackHeight, int StackWidth, int StackChannels, float* out_ptr, bool* rej_ptr, float trim_frac);
+    static void algoESD(const float* stack_ptr, const float* weight_ptr, int StackDepth, int StackHeight, int StackWidth, int StackChannels, float* out_ptr, bool* rej_ptr, float threshold);
     // ... add others
 };

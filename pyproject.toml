@@ -1,3 +1,57 @@
+[project]
+name = "setiastrosuitepro"
+version = "1.6.2"
+description = "Seti Astro Suite Pro - Advanced astrophotography toolkit for image calibration, stacking, registration, photometry, and visualization"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0" }
+authors = [{name = "Franklin Marek", email = "info@setiastro.com"}]
+keywords = ["astrophotography", "astronomy", "image-processing", "photometry"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "pywavelets",
+    "matplotlib",
+    "plotly",
+    "exifread",
+    "lightkurve",
+    "oktopus",
+    "pandas",
+    "tifffile",
+    "Pillow",
+    "requests",
+    "astroquery",
+    "lz4",
+    "zstandard",
+    "astropy",
+    "photutils",
+    "astroalign",
+    "sep",
+    "reproject",
+    "tzlocal",
+    "skyfield",
+    "jplephem",
+    "numba",
+    "onnx",
+    "onnxruntime",
+    "onnxruntime-directml; sys_platform == 'win32'",
+    "xisf",
+    "rawpy",
+    "imageio",
+    "pytz",
+    "PyQt6",
+    "pyqtgraph",
+    "psutil",
+    "opencv-python-headless",
+]
+
 [tool.poetry]
 name = "setiastrosuitepro"
 version = "1.6.2"
@@ -82,7 +136,7 @@ opencv-python-headless = "*"
 pytest = "*"
 
 [build-system]
-[build-system]
+
 requires = ["scikit-build-core", "pybind11", "cmake", "ninja"]
 build-backend = "scikit_build_core.build"
 
@@ -92,8 +146,7 @@ ninja.version = ">=1.5"
 wheel.packages = ["src/setiastro"]
 experimental = true
 
-[tool.scikit-build.metadata.version]
-provider = "poetry"
+
 
 [tool.poetry.extras]
 # Optional extras can be added here if needed in the future

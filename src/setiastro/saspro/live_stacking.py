@@ -38,6 +38,15 @@ from setiastro.saspro.legacy.image_manager import load_image
 from setiastro.saspro.star_alignment import StarRegistrationWorker, StarRegistrationThread, IDENTITY_2x3
 from setiastro.saspro.widgets.spinboxes import CustomSpinBox, CustomDoubleSpinBox
 
+# C++ Backend fallback
+try:
+    from setiastro.saspro.cpp import saspro_cpp as _cpp
+    BackendStacker = _cpp.LiveStacker
+    _HAS_CPP_STACKER = True
+except ImportError:
+    BackendStacker = None
+    _HAS_CPP_STACKER = False
+
 
 class LiveStackSettingsDialog(QDialog):
     """
@@ -393,10 +402,13 @@ class LiveStackWindow(QDialog):
         self.brightness = 0.0   # [-1.0..+1.0]
         self.contrast   = 1.0   # [0.1..3.0]
 
+        # C++ Stacker State
+        self._cpp_stacker = BackendStacker() if _HAS_CPP_STACKER else None
+        self._filter_stackers = {} # key -> BackendStacker
 
-        self._buffer = []    # store up to bootstrap_frames normalized frames
-        self._mu = None      # per-pixel mean (after bootstrap)
-        self._m2 = None      # per-pixel sum of squares differences (for Welford)
+        self._buffer = []    # Legacy fallback buffer
+        self._mu = None      
+        self._m2 = None      
 
         # ─── Create Separate Metrics Window (initially hidden) ─────
         # We do NOT embed this in the stacking dialog’s layout!
@@ -1141,6 +1153,11 @@ class LiveStackWindow(QDialog):
             del self.reference_image_2d
 
         # Re-initialize bootstrapping stats
+        # Re-initialize bootstrapping stats
+        if self._cpp_stacker:
+            self._cpp_stacker.reset()
+        self._filter_stackers.clear()
+
         self._buffer = []
         self._mu = None
         self._m2 = None
@@ -1467,13 +1484,27 @@ class LiveStackWindow(QDialog):
 
             if mono_key:
                 # start the filter stack
-                self.filter_stacks[mono_key]  = norm_plane.copy()
-                self.filter_counts[mono_key]  = 1
-                self.filter_buffers[mono_key] = [norm_plane.copy()]
+                if _HAS_CPP_STACKER:
+                    fs = BackendStacker()
+                    fs.set_sigma_clip(-1.0) # linear for first frame
+                    fs.add_frame(norm_plane)
+                    self._filter_stackers[mono_key] = fs
+                    self.filter_stacks[mono_key] = fs.get_mean()
+                    self.filter_counts[mono_key] = 1
+                else:
+                    self.filter_stacks[mono_key]  = norm_plane.copy()
+                    self.filter_counts[mono_key]  = 1
+                    self.filter_buffers[mono_key] = [norm_plane.copy()]
             else:
                 # start the normal running stack
-                self.current_stack = norm_color.copy()
-                self._buffer = [norm_color.copy()]
+                if _HAS_CPP_STACKER and self._cpp_stacker:
+                    self._cpp_stacker.reset()
+                    self._cpp_stacker.set_sigma_clip(-1.0)
+                    self._cpp_stacker.add_frame(norm_color)
+                    self.current_stack = self._cpp_stacker.get_mean()
+                else:
+                    self.current_stack = norm_color.copy()
+                    self._buffer = [norm_color.copy()]
             # ─── accumulate exposure ─────────────────────
             exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
             if exp_val is not None:
