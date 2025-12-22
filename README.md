@@ -127,6 +127,48 @@ This project uses [Poetry](https://python-poetry.org/) for dependency management
 
 ---
 
+## Optional C++ Backend (Advanced)
+
+SASpro includes an optional C++ backend (`saspro_cpp`) that provides accelerated performance for computationally intensive operations like image stacking, deconvolution, and background extraction.
+
+**Default behavior:** The application works 100% out of the box using Python/Numba. The C++ backend is **completely optional**.
+
+### Enabling the C++ Backend
+
+If you want the performance boost, install OpenCV for your platform and reinstall:
+
+**Windows (vcpkg recommended):**
+```powershell
+# One-time setup
+git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+C:\vcpkg\vcpkg integrate install
+C:\vcpkg\vcpkg install opencv4:x64-windows
+
+# Then install SASpro
+pip install .
+```
+
+**macOS (Homebrew):**
+```bash
+brew install opencv
+pip install .
+```
+
+**Linux (apt):**
+```bash
+sudo apt install libopencv-dev python3-dev cmake
+pip install .
+```
+
+### Verifying C++ Backend
+
+```python
+python -c "import saspro_cpp; print('C++ backend active:', dir(saspro_cpp))"
+```
+
+If successful, you'll see the list of available C++ classes. If not installed, the app automatically uses the Python fallback.
+
 ## Running a Packaged App
 - Packagers like PyInstaller or similar are used to create distributables. See `setiastrosuitepro_mac.spec` and `create_dmg.sh` for packaging examples.
 - When packaged, resources such as `SASP_data.fits` and `astrobin_filters.csv` are expected under the internal resources path. The application code resolves their paths using the `pro.resources` helpers.
